@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 import sys
 import hashlib
+import urllib.request
 
 verbose = False
 
@@ -20,6 +21,21 @@ class upd_info:
                     attribs.append(attribute)
         return(attribs)
 
+def load_online_modules():
+    try:
+        online_modules = []
+        url = "https://www.thatec-innovation.com/Updates/Updates.csv"
+        with urllib.request.urlopen(url) as file:
+            content = file.read().decode(f'utf-8')
+            content = str(content).splitlines()
+            for line in content:
+                online_modules.append(line.split(';')[0])
+        return online_modules
+    except Exception as err:
+        print("Error loading online module list from thatec-innovation.com. Please make sure that no folder name in this directory is identical to any software module in the THATec Innovation device library!")
+        print("Reported error: {}".format(err))
+        return []
+
 def get_existing_filelist(folder):
     if os.path.exists('./'+folder+'/filelist.csv'):
         try:
@@ -34,11 +50,14 @@ def get_existing_filelist(folder):
 
 def get_files_in_folder(folder): # Check all existing files in folder and create MD5 sums
     filelist_array=[] # array into which the filepaths and MD5 sums will be written
+    upd_files = []
     for dirname, dirnames, filenames in os.walk(folder):
         for file in filenames:
-            if file == "filelist.csv" or str(file).endswith('.upd'): # skip filelist.csv and upd files
+            if file == "filelist.csv":# skip filelist.csv
                 pass
             else: #create MD5 sum
+                if str(file).endswith('.upd'): 
+                    upd_files.append(file)
                 hash_md5 = hashlib.md5()
                 file_path = dirname + '\\' + file
                 try:
@@ -50,6 +69,12 @@ def get_files_in_folder(folder): # Check all existing files in folder and create
                 except Exception as err:
                     print("ERROR reading MD5 sum from file {}: {}".format(file_path,err))
                     sys.exit("Stopping execution")
+    upd_path = folder + "\\" + folder + ".upd"
+    if len(upd_files) > 1:
+        print("Multiple .upd files found in folder {}. Please delete files!".format(folder))
+        sys.exit("Stopping execution")
+    elif len(upd_files) == 1 and upd_path not in upd_files: #upd file at incorrect path => rename
+        os.rename(folder + "\\" + upd_files[0],upd_path)
     return filelist_array
 
 def get_deleted_filelist_and_updates (old_filelist, new_filelist):
@@ -57,11 +82,12 @@ def get_deleted_filelist_and_updates (old_filelist, new_filelist):
         "deleted_filelist" : [],
         "update" : False
     }
-    for old_entry in old_filelist: # walk through old entries
-        if old_entry not in new_filelist: # check for differences (different hashsums) 
+    for new_entry in new_filelist: # walk through new entries
+        if new_entry not in old_filelist: # check for new files
             return_value["update"] = True
-        if old_entry[0] not in [row_new[0] for row_new in new_filelist] and not str(old_entry[0]).endswith('.upd') and old_entry[0] != "filelist.csv": 
-            #filename not in new_filelist => deletion (skip filelist.csv and upd files)
+    for old_entry in old_filelist: # walk through old entries
+        if old_entry[0] not in [row_new[0] for row_new in new_filelist] and old_entry[0] != "filelist.csv": 
+            #filename not in new_filelist => deletion (skip filelist.csv)
             return_value["deleted_filelist"].append([old_entry[0],"delete",""])
     return return_value
 
@@ -118,15 +144,18 @@ def read_write_upd(folder, info: upd_info, read: bool):
             sys.exit("Stopping execution")
         return
 
-def write_Updates_csv(folder_list):
+def write_Updates_csv():
+    folders = os.listdir('.')
+    folders.sort()
     update_array = []
-    for folder in folder_list: # walk through all folders
-        info = read_write_upd(folder = folder, info = upd_info(), read = True)
-        if info.Device is not None:
-            update_array.append(info.Device + ';' + info.Compiled + ';')
-        else:
-            print("Upd file not found in folder {} to write into Updates.csv".format(folder))
-            sys.exit("Stopping execution")
+    for folder in folders: # walk through all folders
+        if os.path.isdir(folder): # take only fodlers into account
+            info = read_write_upd(folder = folder, info = upd_info(), read = True)
+            if info.Device is not None:
+                update_array.append(info.Device + ';' + info.Compiled + ';')
+            else:
+                print("Upd file not found in folder {} to write into Updates.csv".format(folder))
+                sys.exit("Stopping execution")
     try:
         with open("Updates.csv","w",encoding="utf-8") as updates_file:
             for entry in update_array:
@@ -136,62 +165,59 @@ def write_Updates_csv(folder_list):
         print("ERROR writing Updates.csv in main folder: {}".format(err))
         sys.exit("Stopping execution")
 
-def check_exe(filelist_array):
-    execs = 0
-    for file in [x[0] for x in filelist_array]:
-        if str(file).endswith('.exe'):
-            execs += 1
-    return execs == 1
-
 def main():
     print("Python version: ")
     print(sys.version)
-
+    if verbose: print("Loading online module list from thatec-innovation.com")
+    online_modules = load_online_modules()
     all_module_folders = os.listdir('.')
     all_module_folders.sort()
-    folder_list = []
 
     for folder in all_module_folders: # walk through all folders
-        if os.path.isdir(folder) and not str(folder).startswith('.'):
+        if os.path.isdir(folder):
+            if folder in online_modules:
+                print("ERROR: Folder name identical to existing device in THATec Innvovation online device library: {}".format(folder))
+                print("Please read the readme file and rename the module folder accordingly!")
+                sys.exit("Stopping execution")
             update = False
             if verbose: print("Current folder: {}".format(folder))
             new_filelist = get_files_in_folder(folder)
             if verbose: print("New filelist created")
-            if check_exe(new_filelist):
-                folder_list.append(folder)
-                old_filelist = get_existing_filelist(folder)
-                if old_filelist is not None:
-                    if verbose: print("Old filelist found, checking for deleted files")
-                    deletions = get_deleted_filelist_and_updates(old_filelist, new_filelist)
-                    if len(deletions["deleted_filelist"]) > 0 or deletions["update"]: # Deleted or updated files detected
-                        print("Deleted or updated files detected in " + folder)
-                        update = True
-                        print(new_filelist)
-                        print(deletions["deleted_filelist"])
-                        new_filelist += deletions["deleted_filelist"] #removed items will be included into the filelist with a "delete" flag in column 1 and will be removed when updating via thaTEC:Core
-                    else:
-                        if verbose: print("No deleted files found")
-                else: # no existing filelist found, check if upd file is available
+            old_filelist = get_existing_filelist(folder)
+            if old_filelist is not None:
+                if verbose: print("Old filelist found, checking for new or deleted files")
+                deletions = get_deleted_filelist_and_updates(old_filelist, new_filelist)
+                if len(deletions["deleted_filelist"]) > 0 or deletions["update"]: # Deleted or updated files detected
+                    print("Deleted or updated files detected in " + folder)
+                    update = True
+                    #print(new_filelist)
+                    #print(deletions["deleted_filelist"])
+                    new_filelist += deletions["deleted_filelist"] #removed items will be included into the filelist with a "delete" flag in column 1 and will be removed when updating via thaTEC:Core
+                else:
+                    if verbose: print("No deleted files found, checking upd file")
                     info = read_write_upd(folder = folder, info = upd_info(), read = True)
                     if info.Device is None: # upd does not exist
                         update = True
-                        print("New module found: {}".format(folder))
+                        print("Upd file not found, creating new upd file")
+            else: # no existing filelist found, check if upd file is available
+                info = read_write_upd(folder = folder, info = upd_info(), read = True)
+                if info.Device is None: # upd does not exist
+                    update = True
+                    print("New module found: {}".format(folder))
+                else:
+                    print("No filelist but upd file found in folder {}.")
+                    x = input("Continue and create new filelist? (y/n):")
+                    if x != 'y':
+                        sys.exit('Stopping execution')
                     else:
-                        print("No filelist but upd file found in folder {}.")
-                        x = input("Continue and create new filelist? (y/n):")
-                        if x != 'y':
-                            sys.exit('Stopping execution')
-                        else:
-                            update = True
-                if update: # write filelist and upd file
-                    print("Updating filelist.csv")
-                    write_filelist_csv(folder, new_filelist) #write new filelist to folder
-                    print("Updating upd file")
-                    update_upd(folder) # update upd file with new compiled date
-            else:
-                print("Error for folder {}. Number of executables (.exe) is not 1! Folder skipped.".format(folder))
+                        update = True
+            if update: # write filelist and upd file
+                print("Updating upd file")
+                update_upd(folder) # update upd file with new compiled date
+                print("Updating filelist.csv")
+                write_filelist_csv(folder, get_files_in_folder(folder)) #write new filelist to folder (update filelist since upd file has been updated)
     if verbose: print("=== Checking folders finished, writing Updates.csv")
-    write_Updates_csv(folder_list) # after writing all required files in module folders => write (global) Updates.csv containing the information on all modules
+    write_Updates_csv() # after writing all required files in module folders => write (global) Updates.csv containing the information on all modules
 
 if __name__ == "__main__":
     main()
